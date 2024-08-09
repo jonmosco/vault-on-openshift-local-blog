@@ -1,0 +1,122 @@
+global:
+   openshift: true
+   enabled: true
+   tlsDisable: false
+
+injector:
+   enabled: true
+
+server:
+
+   extraEnvironmentVars:
+     - name: VAULT_AWSMKS_UNSEAL_KEY_ID
+       valueFrom:
+         secretKeyRef:
+           name: vault-awskms-unseal-key
+           key: unseal-key-id
+     - name: VAULT_CACERT
+       value: /vault/userconfig/vault-ha-tls/vault.ca
+     - name:  VAULT_TLSCERT
+       value: /vault/userconfig/vault-ha-tls/vault.crt
+     - name:  VAULT_TLSKEY
+       value: /vault/userconfig/vault-ha-tls/vault.key
+
+   # Authentication to AWS for auto unseal
+   # create a secrete named 'eks-creds'
+   extraSecretEnvironmentVars:
+    - envName: AWS_ACCESS_KEY_ID
+      secretName: eks-creds
+      secretKey: AWS_ACCESS_KEY_ID
+    - envName: AWS_SECRET_ACCESS_KEY
+      secretName: eks-creds
+      secretKey: AWS_SECRET_ACCESS_KEY
+
+   # For HA configuration and because we need to manually init the vault,
+   # we need to define custom readiness/liveness Probe settings
+   readinessProbe:
+     enabled: true
+     path: "/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204"
+   livenessProbe:
+     enabled: true
+     path: "/v1/sys/health?standbyok=true"
+     initialDelaySeconds: 60
+
+   volumes:
+      - name: userconfig-vault-ha-tls
+        secret:
+         defaultMode: 420
+         secretName: vault-ha-tls
+      # - name: audit-log-storage
+      #   persistentVolumeClaim:
+      #     claimName: vault-audit-log-pvc
+   volumeMounts:
+      - mountPath: /vault/userconfig/vault-ha-tls
+        name: userconfig-vault-ha-tls
+        readOnly: true
+      # - name: audit-log-storage
+      #   mountPath: /vault/logs
+
+   persistentVolumeClaimRetentionPolicy:
+      whenDeleted: Delete
+
+   auditStorage:
+      enabled: true
+      accessMode: ReadWriteOnce
+
+   standalone:
+      enabled: false
+   # since we are deploying on a single node cluster, set the affinity to empty
+   # so all 3 pods can be deployed on the same node
+   affinity: ""
+
+   ha:
+      enabled: true
+      replicas: 3
+      raft:
+         enabled: true
+         setNodeId: true
+         config: |
+            cluster_name = "vault"
+            ui = true
+            listener "tcp" {
+               tls_disable = 0
+               address = "[::]:8200"
+               cluster_address = "[::]:8201"
+               tls_cert_file = "/vault/userconfig/vault-ha-tls/vault.crt"
+               tls_key_file  = "/vault/userconfig/vault-ha-tls/vault.key"
+            }
+            seal "awskms" {
+              region     = "us-east-1"
+              kms_key_id = "${VAULT_AWSMKS_UNSEAL_KEY_ID}"
+              endpoint = "http://localstack:4566"
+            }
+
+            storage "raft" {
+               path = "/vault/data"
+
+               retry_join {
+                 leader_api_addr = "https://vault-0.vault-internal:8200"
+                 leader_ca_cert_file = "/vault/userconfig/vault-ha-tls/vault.ca"
+               }
+               retry_join {
+                 leader_api_addr = "https://vault-1.vault-internal:8200"
+                 leader_ca_cert_file = "/vault/userconfig/vault-ha-tls/vault.ca"
+               }
+               retry_join {
+                 leader_api_addr = "https://vault-2.vault-internal:8200"
+                 leader_ca_cert_file = "/vault/userconfig/vault-ha-tls/vault.ca"
+               }
+            }
+
+            audit "file" {
+              file_path = "/vault/logs/vault_audit.log"
+              log_raw = true
+            }
+
+            telemetry {
+              disable_hostname = true
+              prometheus_retention_time = "12h"
+            }
+
+            disable_mlock = true
+            service_registration "kubernetes" {}
